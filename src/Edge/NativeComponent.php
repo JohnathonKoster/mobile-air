@@ -19,6 +19,7 @@ use Native\Mobile\Edge\Elements\NativeRootStack;
 use Native\Mobile\Edge\Elements\NativeRootTabs;
 use Native\Mobile\Edge\Elements\TabAccessory;
 use Native\Mobile\Edge\Elements\TopBarTitle;
+use Native\Mobile\Edge\Inspector\ElementInspector;
 use Native\Mobile\Edge\Layouts\Builders\NavBar;
 use Native\Mobile\Edge\Layouts\Builders\NavBarOptions;
 use Native\Mobile\Edge\Layouts\Builders\TabBar;
@@ -44,6 +45,40 @@ abstract class NativeComponent
     const EVENT_SHUTDOWN = 16;
 
     const EVENT_NATIVE = 20;
+
+    /** @var array<int, callable(array<string, mixed>): void> */
+    private static array $scopePublishedObservers = [];
+
+    private static int $scopePublishedObserverSeq = 0;
+
+    /** @var array<int, callable(array<string, mixed>): void> */
+    private static array $interactionDispatchedObservers = [];
+
+    private static int $interactionDispatchedObserverSeq = 0;
+
+    /** @var array<int, callable(array<string, mixed>): void> */
+    private static array $interactionWillDispatchObservers = [];
+
+    private static int $interactionWillDispatchObserverSeq = 0;
+
+    /** @var array<int, callable(\Throwable, string): void> */
+    private static array $renderErrorObservers = [];
+
+    private static int $renderErrorObserverSeq = 0;
+
+    private ?\Throwable $lastNotifiedRenderError = null;
+
+    /** @var array<string, array<int, callable(array<string, mixed>, self): void>> */
+    private static array $reservedNativeEventHandlers = [];
+
+    /** @var array<int, array{0: string, 1: int}> */
+    private static array $reservedNativeEventHandlerIndex = [];
+
+    private static int $reservedNativeEventHandlerSeq = 0;
+
+    protected ?string $nativeRenderedView = null;
+
+    protected ?string $nativeRenderedViewPath = null;
 
     private static bool $dumpHandlerRegistered = false;
 
@@ -160,6 +195,8 @@ abstract class NativeComponent
      */
     private function renderToElement(): Element
     {
+        ElementInspector::setActiveScope($this->elementInspectorScope());
+
         $result = $this->render();
 
         return $result instanceof View
@@ -209,7 +246,9 @@ abstract class NativeComponent
             // correctness while the keyed/positional REUSE desync is unsolved.
             $throwaway = [];
 
-            return $element->toArray($this->nativeCallbacks, $nextId, '', 0, $emitted, $throwaway);
+            return $this->stampDebugCallbacks(
+                $element->toArray($this->nativeCallbacks, $nextId, '', 0, $emitted, $throwaway)
+            );
         }
 
         // Explicit invalidation: when the C extension bumps the region's
@@ -253,6 +292,29 @@ abstract class NativeComponent
         // frame guarantees a remounting node always re-emits FULL.
         $this->lastNodeHashes = array_intersect_key($this->lastNodeHashes, $emitted);
 
+        return $this->stampDebugCallbacks($tree);
+    }
+
+    /**
+     * @param  array<string, mixed>  $tree
+     * @return array<string, mixed>
+     */
+    private function stampDebugCallbacks(array $tree): array
+    {
+        if (! ElementInspector::enabled() || isset($tree['flags'])) {
+            return $tree;
+        }
+
+        $expressions = $this->nativeCallbacks->expressions();
+
+        if ($expressions === []) {
+            return $tree;
+        }
+
+        $props = $tree['props'] ?? [];
+        $props['_dbg_callbacks'] = json_encode($expressions);
+        $tree['props'] = $props;
+
         return $tree;
     }
 
@@ -277,6 +339,7 @@ abstract class NativeComponent
 
     protected function view(string $name, array $data = []): Element
     {
+        $this->rememberRenderedView("native.{$name}");
         $viewData = array_merge($this->getPublicProperties(), $data);
 
         NativeElementCollector::reset();
@@ -289,6 +352,19 @@ abstract class NativeComponent
         $content = NativeElementCollector::collect();
 
         return $this->wrapWithChrome($content);
+    }
+
+    private function rememberRenderedView(string $name): void
+    {
+        $this->nativeRenderedView = $name;
+
+        try {
+            $this->nativeRenderedViewPath = view()->exists($name)
+                ? view($name)->getPath()
+                : null;
+        } catch (\Throwable) {
+            $this->nativeRenderedViewPath = null;
+        }
     }
 
     /**
@@ -334,6 +410,8 @@ abstract class NativeComponent
      */
     protected function fromView(View $view): Element
     {
+        $this->nativeRenderedView = $view->getName();
+        $this->nativeRenderedViewPath = $view->getPath();
         $viewData = array_merge($this->getPublicProperties(), $view->getData());
 
         NativeElementCollector::reset();
@@ -1061,6 +1139,8 @@ abstract class NativeComponent
      */
     protected function streamView(string $name, array $data = []): void
     {
+        $this->rememberRenderedView("native.{$name}");
+        ElementInspector::setActiveScope($this->elementInspectorScope());
         $viewData = array_merge($this->getPublicProperties(), $data);
 
         NativeElementCollector::setCallbacks($this->nativeCallbacks);
@@ -1084,6 +1164,122 @@ abstract class NativeComponent
         } finally {
             NativeElementCollector::setStreaming(false);
         }
+    }
+
+    /** @var array{renderMs: float, serializeMs: float, publishMs: float}|null */
+    private ?array $lastFrameTimings = null;
+
+    /** @param callable(array<string, mixed>): void $observer */
+    public static function observeScopePublished(callable $observer): int
+    {
+        $id = ++self::$scopePublishedObserverSeq;
+        self::$scopePublishedObservers[$id] = $observer;
+
+        return $id;
+    }
+
+    public static function stopObservingScopePublished(int $id): void
+    {
+        unset(self::$scopePublishedObservers[$id]);
+    }
+
+    private function recordFrameTimings(float $renderMs, float $serializeMs, float $publishMs): void
+    {
+        if (self::$scopePublishedObservers === []) {
+            return;
+        }
+
+        $this->lastFrameTimings = [
+            'renderMs' => round($renderMs, 3),
+            'serializeMs' => round($serializeMs, 3),
+            'publishMs' => round($publishMs, 3),
+        ];
+    }
+
+    private function notifyScopePublished(): void
+    {
+        if (self::$scopePublishedObservers === []) {
+            return;
+        }
+
+        $snapshot = [
+            'id' => spl_object_hash($this),
+            'name' => class_basename(static::class),
+            'class' => static::class,
+            'uri' => $this->nativeRouter?->currentUri() ?? '',
+            'view' => $this->nativeRenderedView,
+            'viewPath' => $this->nativeRenderedViewPath,
+            'renderCount' => $this->publishCount,
+            'state' => $this->getPublicProperties(),
+            'timings' => $this->lastFrameTimings,
+        ];
+
+        foreach (self::$scopePublishedObservers as $observer) {
+            try {
+                $observer($snapshot);
+            } catch (\Throwable) {
+            }
+        }
+    }
+
+    /**
+     * @param  callable(array<string, mixed>, self): void  $handler
+     */
+    public static function registerReservedNativeEventHandler(string $eventName, callable $handler): int
+    {
+        if (! str_starts_with($eventName, '__')) {
+            throw new \InvalidArgumentException('Reserved native event names must start with "__".');
+        }
+
+        $id = ++self::$reservedNativeEventHandlerSeq;
+        $bucket = &self::$reservedNativeEventHandlers[$eventName];
+        $bucket[$id] = $handler;
+        self::$reservedNativeEventHandlerIndex[$id] = [$eventName, $id];
+
+        return $id;
+    }
+
+    public static function unregisterReservedNativeEventHandler(int $id): void
+    {
+        if (! isset(self::$reservedNativeEventHandlerIndex[$id])) {
+            return;
+        }
+        [$eventName, $handlerKey] = self::$reservedNativeEventHandlerIndex[$id];
+        unset(
+            self::$reservedNativeEventHandlers[$eventName][$handlerKey],
+            self::$reservedNativeEventHandlerIndex[$id],
+        );
+        if (empty(self::$reservedNativeEventHandlers[$eventName])) {
+            unset(self::$reservedNativeEventHandlers[$eventName]);
+        }
+    }
+
+    /** @param array<string, mixed> $event */
+    private function dispatchReservedNativeEvent(array $event): bool
+    {
+        $eventName = $event['event'] ?? '';
+
+        if (! is_string($eventName) || ! str_starts_with($eventName, '__')) {
+            return false;
+        }
+
+        $handlers = self::$reservedNativeEventHandlers[$eventName] ?? null;
+
+        if ($handlers === null) {
+            return false;
+        }
+
+        $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+
+        foreach ($handlers as $handler) {
+            try {
+                $handler($payload, $this);
+            } catch (\Throwable $e) {
+                NativeRouter::debugLog('reserved native event handler failed: '.$e->getMessage());
+            }
+        }
+
+        return true;
     }
 
     private function getPublicProperties(): array
@@ -1327,6 +1523,8 @@ abstract class NativeComponent
         $this->placeholderPublished = true;
         $this->nativeCallbacks ??= new CallbackRegistry;
         $this->nativeCallbacks->reset();
+
+        ElementInspector::setActiveScope($this->elementInspectorScope());
 
         try {
             $result = $this->placeholder();
@@ -1760,10 +1958,14 @@ abstract class NativeComponent
 
             if (! $this->nativeHasError) {
                 try {
-                    if (! $this->renderStreaming()) {
+                    if ($this->renderStreaming()) {
+                        $this->publishCount++;
+                        $this->notifyScopePublished();
+                    } else {
                         $element = $this->renderToElement();
                         $tree = $this->memoizedToArray($element);
                         nativephp_element_publish($tree);
+                        $this->notifyScopePublished();
                     }
                 } catch (NativeDumpException $e) {
                     $this->renderDumpScreen($e);
@@ -1818,6 +2020,10 @@ abstract class NativeComponent
 
             // Native event from bridge function — dispatch to #[OnNative] listeners
             if (($event['type'] ?? -1) === self::EVENT_NATIVE) {
+                if ($this->dispatchReservedNativeEvent($event)) {
+                    continue;
+                }
+
                 try {
                     $this->dispatchNativeEvent($event);
                 } catch (NativeDumpException $e) {
@@ -1940,6 +2146,13 @@ abstract class NativeComponent
                         // Explicit streaming path
                         $this->nativeRouter?->flushDeferredTransition();
                         $t3 = microtime(true);
+                        $this->publishCount++;
+                        $this->recordFrameTimings(
+                            ($t3 - $t0) * 1000,
+                            0.0,
+                            0.0,
+                        );
+                        $this->notifyScopePublished();
                         NativeRouter::debugLog(sprintf(
                             'PERF [%s] streaming total=%.1fms',
                             static::class, ($t3 - $t0) * 1000
@@ -1954,6 +2167,13 @@ abstract class NativeComponent
                         $this->nativeRouter?->flushDeferredTransition();
 
                         nativephp_element_publish($tree);
+
+                        $this->recordFrameTimings(
+                            ($t1 - $t0) * 1000,
+                            ($t2 - $t1) * 1000,
+                            (microtime(true) - $t2) * 1000,
+                        );
+                        $this->notifyScopePublished();
 
                         $t3 = microtime(true);
                         NativeRouter::debugLog(sprintf(
@@ -2031,6 +2251,10 @@ abstract class NativeComponent
 
             // Native event from bridge function — dispatch to #[OnNative] listeners
             if (($event['type'] ?? -1) === self::EVENT_NATIVE) {
+                if ($this->dispatchReservedNativeEvent($event)) {
+                    continue;
+                }
+
                 try {
                     $this->dispatchNativeEvent($event);
                 } catch (NativeDumpException $e) {
@@ -2227,6 +2451,13 @@ abstract class NativeComponent
         $this->nativeRouter = $router;
     }
 
+    public function elementInspectorScope(): string
+    {
+        $uri = $this->nativeRouter?->currentUri();
+
+        return $uri === null || $uri === '' ? static::class : static::class.'|'.$uri;
+    }
+
     public function setParams(array $params): void
     {
         $this->nativeParams = $params;
@@ -2252,10 +2483,41 @@ abstract class NativeComponent
 
     // ── Error screen ────────────────────────────────
 
+    /** @param callable(\Throwable, string): void $observer */
+    public static function observeRenderError(callable $observer): int
+    {
+        $id = ++self::$renderErrorObserverSeq;
+        self::$renderErrorObservers[$id] = $observer;
+
+        return $id;
+    }
+
+    public static function stopObservingRenderError(int $id): void
+    {
+        unset(self::$renderErrorObservers[$id]);
+    }
+
+    private function notifyRenderError(\Throwable $e): void
+    {
+        if (self::$renderErrorObservers === [] || $this->lastNotifiedRenderError === $e) {
+            return;
+        }
+
+        $this->lastNotifiedRenderError = $e;
+
+        foreach (self::$renderErrorObservers as $observer) {
+            try {
+                $observer($e, static::class);
+            } catch (\Throwable) {
+            }
+        }
+    }
+
     public function renderErrorScreen(\Throwable $e): void
     {
         $this->nativeHasError = true;
         $this->errorException = $e;
+        $this->notifyRenderError($e);
         $this->nativeCallbacks ??= new CallbackRegistry;
 
         try {
@@ -2638,29 +2900,143 @@ abstract class NativeComponent
         // the new `nav_search_items` corpus.
         $kind = $this->nativeCallbacks->kind($event['callback_id'] ?? 0);
 
-        if ($kind === 'search_query') {
-            $result = $this->$method(...[...$args, ...$eventArgs]);
-            if (is_array($result)) {
-                $this->pendingSearchResults = array_values($result);
+        $observing = self::$interactionDispatchedObservers !== [];
+        $before = $observing ? $this->getPublicProperties() : [];
+        $startedAt = $observing ? microtime(true) : 0.0;
+        $error = null;
+        $reportedArgs = [...$args, ...$eventArgs];
+
+        if (self::$interactionWillDispatchObservers !== []) {
+            $willSnapshot = [
+                'id' => spl_object_hash($this),
+                'class' => static::class,
+                'method' => $method,
+                'eventType' => (int) $type,
+                'callbackId' => (int) ($event['callback_id'] ?? 0),
+            ];
+            foreach (self::$interactionWillDispatchObservers as $willObserver) {
+                try {
+                    $willObserver($willSnapshot);
+                } catch (\Throwable) {
+                }
+            }
+        }
+
+        try {
+            if ($kind === 'search_query') {
+                $result = $this->$method(...[...$args, ...$eventArgs]);
+                if (is_array($result)) {
+                    $this->pendingSearchResults = array_values($result);
+                }
+
+                return;
             }
 
+            // The C bridge carries virtual windows as TEXT_CHANGE with "from,to" text.
+            if ($kind === 'virtual_window') {
+                $payload = $event['text'] ?? '';
+                $parts = explode(',', $payload, 2);
+                $from = (int) ($parts[0] ?? 0);
+                $to = (int) ($parts[1] ?? 0);
+                $reportedArgs = [...$args, $from, $to];
+                $this->$method(...[...$args, $from, $to]);
+
+                return;
+            }
+
+            $this->$method(...[...$args, ...$eventArgs]);
+        } catch (\Throwable $e) {
+            $error = $e;
+            throw $e;
+        } finally {
+            if ($observing) {
+                $this->notifyInteractionDispatched(
+                    $event,
+                    (int) $type,
+                    $method,
+                    $reportedArgs,
+                    $before,
+                    $startedAt,
+                    $error,
+                );
+            }
+        }
+    }
+
+    /** @param callable(array<string, mixed>): void $observer */
+    public static function observeInteractionDispatched(callable $observer): int
+    {
+        $id = ++self::$interactionDispatchedObserverSeq;
+        self::$interactionDispatchedObservers[$id] = $observer;
+
+        return $id;
+    }
+
+    public static function stopObservingInteractionDispatched(int $id): void
+    {
+        unset(self::$interactionDispatchedObservers[$id]);
+    }
+
+    /** @param callable(array<string, mixed>): void $observer */
+    public static function observeInteractionWillDispatch(callable $observer): int
+    {
+        $id = ++self::$interactionWillDispatchObserverSeq;
+        self::$interactionWillDispatchObservers[$id] = $observer;
+
+        return $id;
+    }
+
+    public static function stopObservingInteractionWillDispatch(int $id): void
+    {
+        unset(self::$interactionWillDispatchObservers[$id]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $event
+     * @param  array<int, mixed>  $args
+     * @param  array<string, mixed>  $before
+     */
+    private function notifyInteractionDispatched(array $event, int $type, string $method, array $args, array $before, float $startedAt, ?\Throwable $error = null): void
+    {
+        if (self::$interactionDispatchedObservers === []) {
             return;
         }
 
-        // 'virtual_window' callbacks ride on the TEXT_CHANGE event format
-        // (the C extension parses payloads by event type — reusing
-        // TEXT_CHANGE keeps the extension untouched). Native packs
-        // "from,to" as the text; we decode and pass two ints.
-        if ($kind === 'virtual_window') {
-            $payload = $event['text'] ?? '';
-            $parts = explode(',', $payload, 2);
-            $from = (int) ($parts[0] ?? 0);
-            $to = (int) ($parts[1] ?? 0);
-            $this->$method(...[...$args, $from, $to]);
+        $snapshot = [
+            'id' => spl_object_hash($this),
+            'name' => class_basename(static::class),
+            'class' => static::class,
+            'uri' => $this->nativeRouter?->currentUri() ?? '',
+            'method' => $method,
+            'eventType' => $type,
+            'callbackId' => (int) ($event['callback_id'] ?? 0),
+            'nodeId' => isset($event['node_id']) ? self::unsignedNodeId((int) $event['node_id']) : null,
+            'args' => array_values(array_filter(
+                $args,
+                static fn ($arg): bool => is_scalar($arg) || $arg === null,
+            )),
+            'stateBefore' => $before,
+            'stateAfter' => $this->getPublicProperties(),
+            'renderCount' => $this->publishCount,
+            'durationMs' => (microtime(true) - $startedAt) * 1000.0,
+            'error' => $error === null ? null : [
+                'class' => $error::class,
+                'message' => $error->getMessage(),
+                'file' => $error->getFile(),
+                'line' => $error->getLine(),
+            ],
+        ];
 
-            return;
+        foreach (self::$interactionDispatchedObservers as $observer) {
+            try {
+                $observer($snapshot);
+            } catch (\Throwable) {
+            }
         }
+    }
 
-        $this->$method(...[...$args, ...$eventArgs]);
+    private static function unsignedNodeId(int $id): int
+    {
+        return $id < 0 ? $id + 0x100000000 : $id;
     }
 }
