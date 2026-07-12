@@ -168,6 +168,34 @@ class PlatformFileOperationsTest extends TestCase
         $this->assertEquals('version = "2.0.0"', File::get($testFile));
     }
 
+    public function test_platform_optimized_copy_excludes_nested_vendor_directories()
+    {
+        File::put($this->testSourceDir.'/file1.txt', 'content1');
+        File::makeDirectory($this->testSourceDir.'/vendor/acme/package/src', 0755, true);
+        File::put($this->testSourceDir.'/vendor/acme/package/src/Thing.php', '<?php');
+        File::makeDirectory($this->testSourceDir.'/vendor/acme/package/vendor/dev-dep', 0755, true);
+        File::put($this->testSourceDir.'/vendor/acme/package/vendor/dev-dep/dep.php', '<?php');
+
+        $this->platformOptimizedCopy($this->testSourceDir, $this->testDestDir, ['storage/logs']);
+
+        $this->assertFileExists($this->testDestDir.'/file1.txt');
+        $this->assertFileExists($this->testDestDir.'/vendor/acme/package/src/Thing.php');
+        $this->assertDirectoryDoesNotExist($this->testDestDir.'/vendor/acme/package/vendor');
+    }
+
+    public function test_platform_optimized_copy_excludes_vcs_metadata_at_any_depth()
+    {
+        File::put($this->testSourceDir.'/file1.txt', 'content1');
+        File::makeDirectory($this->testSourceDir.'/vendor/acme/package/.git', 0755, true);
+        File::put($this->testSourceDir.'/vendor/acme/package/.git/config', 'git config');
+        File::put($this->testSourceDir.'/vendor/acme/package/composer.json', '{}');
+
+        $this->platformOptimizedCopy($this->testSourceDir, $this->testDestDir, ['storage/logs']);
+
+        $this->assertFileExists($this->testDestDir.'/vendor/acme/package/composer.json');
+        $this->assertDirectoryDoesNotExist($this->testDestDir.'/vendor/acme/package/.git');
+    }
+
     public function test_replace_file_contents_regex_handles_multiline()
     {
         $testFile = $this->testSourceDir.'/multiline_test.txt';

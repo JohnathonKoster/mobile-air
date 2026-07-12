@@ -12,12 +12,26 @@ trait PlatformFileOperations
     protected function platformOptimizedCopy(string $source, string $destination, array $excludedDirs = []): void
     {
         if (PHP_OS_FAMILY === 'Windows') {
+            $source = str_replace('/', '\\', $source);
+            $destination = str_replace('/', '\\', $destination);
+
             // Use robocopy on Windows
             if (! empty($excludedDirs)) {
                 $excludeArgs = '';
                 foreach ($excludedDirs as $dir) {
+                    // /XD accepts directory paths without wildcard suffixes.
+                    $dir = str_replace('/', '\\', rtrim($dir, '/*\\'));
                     $excludeArgs .= " /XD \"{$source}\\{$dir}\"";
                 }
+
+                // Enumerate nested package vendors because /XD has no path globs.
+                $vendorGlob = str_replace('\\', '/', $source).'/vendor/*/*/vendor';
+                foreach (glob($vendorGlob, GLOB_ONLYDIR) ?: [] as $nestedVendor) {
+                    $excludeArgs .= ' /XD "'.str_replace('/', '\\', $nestedVendor).'"';
+                }
+
+                $excludeArgs .= ' /XD .git /XD node_modules';
+
                 $cmd = "robocopy \"{$source}\" \"{$destination}\" /MIR /NFL /NDL /NJH /NJS /NP /R:0 /W:0{$excludeArgs}";
             } else {
                 $cmd = "xcopy \"{$source}\\*\" \"{$destination}\\\" /E /I /Y /Q";
@@ -34,7 +48,10 @@ trait PlatformFileOperations
             if (! empty($excludedDirs)) {
                 // Add specific exclusions for nested vendor directories that cause rsync cycles
                 $excludedDirs[] = 'vendor/*/vendor';
+                $excludedDirs[] = 'vendor/*/*/vendor';
                 $excludedDirs[] = 'vendor/nativephp/mobile/vendor';
+                $excludedDirs[] = '.git';
+                $excludedDirs[] = 'node_modules';
                 $excludeFlags = implode(' ', array_map(fn ($d) => "--exclude='{$d}'", $excludedDirs));
                 $cmd = "rsync -aL {$excludeFlags} \"{$source}/\" \"{$destination}/\"";
             } else {

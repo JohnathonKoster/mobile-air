@@ -89,6 +89,8 @@ class BundleFileManager
         foreach ($excludes as $pattern) {
             $dir = ltrim($pattern, '/\\');
             $dir = str_replace('/', '\\', $dir);
+            // Robocopy /XD accepts directories, not wildcard suffixes.
+            $dir = rtrim($dir, '/*\\');
             $excludeArgs .= " /XD \"{$source}\\{$dir}\"";
         }
 
