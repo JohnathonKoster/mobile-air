@@ -153,6 +153,27 @@ let package = Package(
         $this->assertStringContainsString('TestFunctions.Execute()', $content);
     }
 
+    /** @test */
+    public function it_generates_plugin_init_function_calls(): void
+    {
+        $plugin = $this->createTestPlugin([
+            'ios' => [
+                'init_function' => 'initializeTestPlugin',
+            ],
+        ]);
+
+        $this->mockRegistry
+            ->shouldReceive('all')
+            ->andReturn(collect([$plugin]));
+
+        $this->compiler->compile();
+
+        $generatedPath = $this->testBasePath.'/ios/NativePHP/Bridge/Plugins/PluginBridgeFunctionRegistration.swift';
+        $content = $this->files->get($generatedPath);
+
+        $this->assertStringContainsString('initializeTestPlugin()', $content);
+    }
+
     /**
      * @test
      *

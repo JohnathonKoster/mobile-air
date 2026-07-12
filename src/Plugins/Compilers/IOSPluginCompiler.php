@@ -102,8 +102,12 @@ class IOSPluginCompiler
         // Get plugins with iOS code (for copying files)
         $pluginsWithCode = $allPlugins->filter(fn (Plugin $p) => $p->hasIosCode());
 
-        // Get plugins with iOS bridge functions (for registration)
+        // Get plugins with iOS bridge functions or an init hook (for registration)
         $pluginsWithFunctions = $allPlugins->filter(function (Plugin $p) {
+            if ($p->getIosInitFunction() !== null) {
+                return true;
+            }
+
             $functions = $p->getBridgeFunctions();
             foreach ($functions as $function) {
                 if (! empty($function['ios'])) {
