@@ -474,7 +474,8 @@ trait PreparesBuild
     protected function executeGradleBuild(string $gradleTask, ?array $signingConfig = null): bool
     {
         $androidPath = base_path('nativephp/android');
-        $gradleWrapper = PHP_OS_FAMILY === 'Windows' ? 'gradlew.bat' : './gradlew';
+        // Windows may not resolve batch files from the current directory.
+        $gradleWrapper = PHP_OS_FAMILY === 'Windows' ? '.\gradlew.bat' : './gradlew';
 
         $this->newLine();
 

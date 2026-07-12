@@ -448,7 +448,8 @@ XML;
     private function runTheAndroidBuild(?string $targetDeviceId): bool
     {
         $androidPath = base_path('nativephp/android');
-        $gradleWrapper = PHP_OS_FAMILY === 'Windows' ? 'gradlew.bat' : './gradlew';
+        // Windows may not resolve batch files from the current directory.
+        $gradleWrapper = PHP_OS_FAMILY === 'Windows' ? '.\gradlew.bat' : './gradlew';
 
         if (PHP_OS_FAMILY !== 'Windows') {
             $gradlePath = $androidPath.DIRECTORY_SEPARATOR.'gradlew';
