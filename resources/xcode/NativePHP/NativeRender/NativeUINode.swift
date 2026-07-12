@@ -150,6 +150,8 @@ final class GenericProps: Equatable {
         map[key] != nil
     }
 
+    var entries: [String: Any] { map }
+
     var isEmpty: Bool { map.isEmpty }
 
     var debugDescription: String { "\(map)" }

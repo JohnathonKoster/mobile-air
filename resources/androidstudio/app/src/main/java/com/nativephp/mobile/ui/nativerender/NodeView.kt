@@ -264,6 +264,8 @@ fun NodeView(node: NativeUINode, overrideModifier: Modifier? = null) {
 
         modifier = modifier.nodeStyle(node.style, node.props, isDarkMode)
 
+        modifier = NativeNodeDecoratorRegistry.apply(node, modifier)
+
         if (hasPress && radius > 0f) {
             modifier = modifier.clip(RoundedCornerShape(radius.dp))
         }

@@ -253,6 +253,8 @@ class GenericProps(private val map: Map<String, Any> = emptyMap()) {
 
     val isEmpty: Boolean get() = map.isEmpty()
 
+    val entries: Map<String, Any> get() = map
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is GenericProps) return false

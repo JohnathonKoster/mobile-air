@@ -433,6 +433,9 @@ final class NativeElementBridge {
                 }
             }
 
+            // Keep observer serialization off the main thread.
+            NativeElementObservationRegistry.shared.publish(tree: finalTree)
+
             let isNav = update.isNav
             DispatchQueue.main.async {
                 // T2 checkpoint — tree is now on the main thread about
@@ -634,6 +637,13 @@ final class NativeElementBridge {
         } else {
             nativeElementWriteEvent(t, c, n, nil, 0)
         }
+
+        // Publish only after the event reaches the native queue.
+        NativeElementObservationRegistry.shared.publishEvent(
+            type: type,
+            callbackId: callbackId,
+            nodeId: nodeId
+        )
     }
 
     // MARK: - Flat Buffer Tree Reader

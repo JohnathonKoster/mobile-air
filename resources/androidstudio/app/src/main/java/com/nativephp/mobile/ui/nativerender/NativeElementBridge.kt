@@ -131,6 +131,11 @@ class NativeElementBridge private constructor() {
         /** Event queue — Compose callbacks enqueue, pollEvent() dequeues (blocks PHP thread) */
         private val eventQueue = LinkedBlockingQueue<NativeUIEvent>()
 
+        private fun writeElementEvent(type: Int, callbackId: Int, nodeId: Int, data: ByteArray?) {
+            nativeElementWriteEvent(type, callbackId, nodeId, data)
+            NativeElementObservationRegistry.publishEvent(type, callbackId, nodeId)
+        }
+
         /* ── Shadow Thread ── */
 
         /** Pending update — AtomicReference for lock-free coalescing */
@@ -346,6 +351,9 @@ class NativeElementBridge private constructor() {
 
                         Log.d(TAG, "PERF shadow: jni+copy=${(update.t1-update.t0)/1_000_000}ms parse=${(tParseEnd-tParseStart)/1_000_000}ms nodes=$nc types=${update.typeTable.size} isNav=${update.isNav} cont=$nativeChromeContinuation")
 
+                        // Keep observer serialization off the main thread.
+                        NativeElementObservationRegistry.publishTree(diffedTree)
+
                         val isNav = update.isNav
                         mainHandler.post {
                             PerformanceTracker.onTreePostedToMain()
@@ -358,7 +366,9 @@ class NativeElementBridge private constructor() {
                             // screenKey would trigger the AnimatedContent at
                             // NativeUIContent's root, replacing the system
                             // animation with a slide overlay.
-                            if (isNav && !nativeChromeContinuation) NativeUIBridge.screenKey.intValue++
+                            if (isNav && !nativeChromeContinuation) {
+                                NativeUIBridge.screenKey.intValue++
+                            }
                             NativeUIBridge.currentTree.value = diffedTree
                             // First publish after a hot-reload dismisses
                             // the "Reloading…" pill and clears the
@@ -714,14 +724,14 @@ class NativeElementBridge private constructor() {
             val buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
             buf.putFloat(x)
             buf.putFloat(y)
-            nativeElementWriteEvent(EventType.PRESS, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.PRESS, callbackId, nodeId, buf.array())
         }
 
         fun sendLongPressEvent(callbackId: Int, nodeId: Int, x: Float = 0f, y: Float = 0f) {
             val buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
             buf.putFloat(x)
             buf.putFloat(y)
-            nativeElementWriteEvent(EventType.LONG_PRESS, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.LONG_PRESS, callbackId, nodeId, buf.array())
         }
 
         fun sendTextChangeEvent(callbackId: Int, nodeId: Int, text: String) {
@@ -730,14 +740,14 @@ class NativeElementBridge private constructor() {
             val buf = ByteBuffer.allocate(4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(textBytes.size)
             buf.put(textBytes)
-            nativeElementWriteEvent(EventType.TEXT_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.TEXT_CHANGE, callbackId, nodeId, buf.array())
         }
 
         fun sendToggleChangeEvent(callbackId: Int, nodeId: Int, value: Boolean) {
             PerformanceTracker.onInteractionStart(callbackId, "toggle_change")
             val buf = ByteBuffer.allocate(1).order(ByteOrder.LITTLE_ENDIAN)
             buf.put(if (value) 1.toByte() else 0.toByte())
-            nativeElementWriteEvent(EventType.TOGGLE_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.TOGGLE_CHANGE, callbackId, nodeId, buf.array())
         }
 
         fun sendSubmitEvent(callbackId: Int, nodeId: Int, text: String) {
@@ -745,25 +755,25 @@ class NativeElementBridge private constructor() {
             val buf = ByteBuffer.allocate(4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(textBytes.size)
             buf.put(textBytes)
-            nativeElementWriteEvent(EventType.SUBMIT, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.SUBMIT, callbackId, nodeId, buf.array())
         }
 
         fun sendSystemBackEvent() {
-            nativeElementWriteEvent(EventType.SYSTEM_BACK, 0, 0, null)
+            writeElementEvent(EventType.SYSTEM_BACK, 0, 0, null)
         }
 
         fun sendSliderChangeEvent(callbackId: Int, nodeId: Int, value: Float) {
             PerformanceTracker.onInteractionStart(callbackId, "slider_change")
             val buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
             buf.putFloat(value)
-            nativeElementWriteEvent(EventType.SLIDER_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.SLIDER_CHANGE, callbackId, nodeId, buf.array())
         }
 
         fun sendCheckboxChangeEvent(callbackId: Int, nodeId: Int, value: Boolean) {
             PerformanceTracker.onInteractionStart(callbackId, "checkbox_change")
             val buf = ByteBuffer.allocate(1).order(ByteOrder.LITTLE_ENDIAN)
             buf.put(if (value) 1.toByte() else 0.toByte())
-            nativeElementWriteEvent(EventType.CHECKBOX_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.CHECKBOX_CHANGE, callbackId, nodeId, buf.array())
         }
 
         fun sendRadioChangeEvent(callbackId: Int, nodeId: Int, value: String) {
@@ -772,18 +782,18 @@ class NativeElementBridge private constructor() {
             val buf = ByteBuffer.allocate(4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(textBytes.size)
             buf.put(textBytes)
-            nativeElementWriteEvent(EventType.RADIO_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.RADIO_CHANGE, callbackId, nodeId, buf.array())
         }
 
         fun sendTabChangeEvent(callbackId: Int, nodeId: Int, index: Int) {
             PerformanceTracker.onInteractionStart(callbackId, "tab_change")
             val buf = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN)
             buf.putShort(index.toShort())
-            nativeElementWriteEvent(EventType.TAB_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.TAB_CHANGE, callbackId, nodeId, buf.array())
         }
 
         fun sendSheetDismissEvent(callbackId: Int, nodeId: Int) {
-            nativeElementWriteEvent(EventType.SHEET_DISMISS, callbackId, nodeId, null)
+            writeElementEvent(EventType.SHEET_DISMISS, callbackId, nodeId, null)
         }
 
         /**
@@ -796,7 +806,7 @@ class NativeElementBridge private constructor() {
          * main-thread hang (ANR).
          */
         fun sendShutdownEvent() {
-            nativeElementWriteEvent(EventType.SHUTDOWN, 0, 0, null)
+            writeElementEvent(EventType.SHUTDOWN, 0, 0, null)
         }
 
         fun sendHotReloadEvent() {
@@ -805,7 +815,7 @@ class NativeElementBridge private constructor() {
             if (!ready) {
                 Log.e(TAG, "sendHotReloadEvent: element NOT ready — event will be dropped")
             }
-            nativeElementWriteEvent(EventType.HOT_RELOAD, 0, 0, null)
+            writeElementEvent(EventType.HOT_RELOAD, 0, 0, null)
         }
 
         fun sendSelectChangeEvent(callbackId: Int, nodeId: Int, value: String) {
@@ -814,7 +824,7 @@ class NativeElementBridge private constructor() {
             val buf = ByteBuffer.allocate(4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(textBytes.size)
             buf.put(textBytes)
-            nativeElementWriteEvent(EventType.SELECT_CHANGE, callbackId, nodeId, buf.array())
+            writeElementEvent(EventType.SELECT_CHANGE, callbackId, nodeId, buf.array())
         }
 
         /**
@@ -831,7 +841,7 @@ class NativeElementBridge private constructor() {
             buf.put(nameBytes)
             buf.putInt(payloadBytes.size)
             buf.put(payloadBytes)
-            nativeElementWriteEvent(EventType.NATIVE, 0, 0, buf.array())
+            writeElementEvent(EventType.NATIVE, 0, 0, buf.array())
         }
 
         /* ── Tree Diff — reuse unchanged node references ── */

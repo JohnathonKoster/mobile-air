@@ -103,6 +103,10 @@ class NativeUIBridge private constructor() {
             NativeElementBridge.sendSelectChangeEvent(callbackId, nodeId, value)
         }
 
+        fun sendNativeEvent(eventName: String, payloadJson: String) {
+            NativeElementBridge.sendNativeEvent(eventName, payloadJson)
+        }
+
         /* ── Legacy compat stubs (called by MainActivity) ── */
 
         fun startWatching() {

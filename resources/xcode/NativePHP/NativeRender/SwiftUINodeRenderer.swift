@@ -41,13 +41,10 @@ extension EnvironmentValues {
 struct NativeTreeRenderer: View {
     let tree: NativeUITree
 
-    var body: some View {
+    var body: AnyView {
         // Fold any plugin-registered root hosts (side drawers, global overlays,
         // …) around the rendered tree. A host pulls its own sentinel child out
-        // of `tree.root` and renders nothing when absent. When no hosts are
-        // registered this returns `rootContent` unchanged, so trees that use no
-        // plugin chrome pay nothing — preserving the minimal-wrapping guarantee
-        // below (for the iOS 26 tabs Liquid Glass capsule).
+        // of `tree.root` and renders nothing when absent.
         NativeRootHostRegistry.shared.wrap(root: tree.root, content: AnyView(rootContent))
     }
 
@@ -146,6 +143,7 @@ struct NodeView: View, Equatable {
             // `.textSelection` is inherited) — container-scoped like Android's
             // SelectionContainer. No-op when the prop is absent.
             .modifier(NodeTextSelectionModifier(props: node.props))
+            .modifier(NativeNodeDecorationModifier(node: node))
             // Animation modifier runs AFTER style so it sees the resolved
             // opacity. No-op when `animate-duration` is not set, so the
             // hot path is unchanged for non-animated nodes.
