@@ -2,9 +2,13 @@
 
 namespace Native\Mobile\Edge;
 
+use Native\Mobile\Edge\Concerns\HasInspectorMetadata;
+use Native\Mobile\Edge\Inspector\ElementInspector;
+
 abstract class Element
 {
     use Concerns\HasA11y;
+    use HasInspectorMetadata;
 
     protected string $type;
 
@@ -118,6 +122,10 @@ abstract class Element
      */
     public function class(string $classes): static
     {
+        if (ElementInspector::enabled()) {
+            $this->rememberClassString($classes);
+        }
+
         $attrs = TailwindParser::parse($classes);
         // Same order the collector uses for blade elements (applyAttributes
         // FIRST) so element-specific styling — Text font-size/weight/color,
@@ -755,6 +763,11 @@ abstract class Element
         $layout = $this->getLayout();
         $style = $this->getStyle();
         $props = $this->getResolvedProps($registry);
+
+        // Decoration must contribute to the content hash.
+        if (ElementInspector::enabled()) {
+            ElementInspector::decorate($this, $id, $layout, $style, $props);
+        }
 
         $onPress = null;
         $onLongPress = null;

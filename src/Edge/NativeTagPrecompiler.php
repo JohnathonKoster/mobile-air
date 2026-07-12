@@ -568,6 +568,15 @@ class NativeTagPrecompiler
         $remaining = $rawAttrs;
 
         while (($remaining = ltrim($remaining)) !== '') {
+            // Parse namespaced sidecars before generic dynamic attributes.
+            if (preg_match('/^(runtime_data:[a-zA-Z0-9_\-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')/s', $remaining, $m)) {
+                $value = $m[2] !== '' ? $m[2] : ($m[3] ?? '');
+                $parts[] = "'".addslashes($m[1])."' => '".addslashes($value)."'";
+                $remaining = substr($remaining, strlen($m[0]));
+
+                continue;
+            }
+
             // Dynamic attribute :name="expr"
             if (preg_match('/^:([a-zA-Z0-9_\-]+)\s*=\s*"([^"]*)"/s', $remaining, $m)) {
                 $parts[] = "'".addslashes($m[1])."' => (".$m[2].')';

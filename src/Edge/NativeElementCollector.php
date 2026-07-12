@@ -6,6 +6,7 @@ use Native\Mobile\Edge\Elements\Column;
 use Native\Mobile\Edge\Elements\Row;
 use Native\Mobile\Edge\Elements\ScrollView;
 use Native\Mobile\Edge\Elements\Stack;
+use Native\Mobile\Edge\Inspector\ElementInspector;
 
 class NativeElementCollector
 {
@@ -36,6 +37,8 @@ class NativeElementCollector
      */
     protected static array $keyPathStack = [];
 
+    protected static int $streamingNextId = 1;
+
     /**
      * Frame-level re-render intervals (ms) collected from `native:poll`
      * attributes during the current render. Drained by the component via
@@ -64,6 +67,11 @@ class NativeElementCollector
 
     public static function setStreaming(bool $enabled): void
     {
+        if ($enabled && ! static::$streaming) {
+            static::$streamingNextId = 1;
+            static::$keyPathStack = [];
+        }
+
         static::$streaming = $enabled;
     }
 
@@ -120,6 +128,9 @@ class NativeElementCollector
 
     public static function openStreaming(string $type, array $attrs): void
     {
+        $runtimeData = static::extractRuntimeData($attrs);
+        $authoredClasses = isset($attrs['class']) && is_string($attrs['class']) ? $attrs['class'] : null;
+
         if (isset($attrs['class'])) {
             $classAttrs = TailwindParser::parse($attrs['class']);
             $attrs = array_merge($classAttrs, $attrs);
@@ -127,6 +138,7 @@ class NativeElementCollector
         }
 
         [$nodeId, $myKeyPath] = static::resolveStreamingKey($attrs);
+        $publishedNodeId = static::resolveStreamingPublishedId($nodeId);
         static::$keyPathStack[] = $myKeyPath;
 
         $builtinTypes = ['column', 'row', 'stack', 'scroll_view', 'pressable', 'canvas'];
@@ -134,7 +146,8 @@ class NativeElementCollector
         if (in_array($type, $builtinTypes, true)) {
             $layout = static::buildLayoutArray($attrs);
             $style = static::buildStyleArray($attrs);
-            $props = static::buildDarkProps($attrs) + static::buildAnimationProps($attrs);
+            $props = static::buildDarkProps($attrs) + static::buildAnimationProps($attrs)
+                + static::runtimeDataProps($runtimeData) + static::debugHandlerProps($attrs);
             $onPress = static::resolveOnPress($attrs);
             $onLongPress = static::resolveOnLongPress($attrs);
 
@@ -142,6 +155,8 @@ class NativeElementCollector
             if (($doubleTap = static::resolveOnDoubleTap($attrs)) !== 0) {
                 $props['on_double_tap'] = $doubleTap;
             }
+
+            ElementInspector::decorateStreaming($type, $publishedNodeId, $authoredClasses, $attrs, $layout, $style, $props);
 
             // ScrollView needs overflow: scroll so Yoga doesn't constrain children
             if ($type === 'scroll_view' && ! isset($layout['overflow'])) {
@@ -177,8 +192,11 @@ class NativeElementCollector
             if (! empty($darkProps)) {
                 $props = array_merge($props ?? [], $darkProps);
             }
+            $props = array_merge($props ?? [], static::runtimeDataProps($runtimeData), static::debugHandlerProps($attrs));
             $onPress = $element->getPressCallbackId(static::$callbacks);
             $onLongPress = $element->getLongPressCallbackId(static::$callbacks);
+
+            ElementInspector::decorateStreaming($type, $publishedNodeId, $authoredClasses, $attrs, $layout, $style, $props);
 
             nphp_node_open(
                 $type,
@@ -201,6 +219,9 @@ class NativeElementCollector
 
     public static function leafStreaming(string $type, array $attrs): void
     {
+        $runtimeData = static::extractRuntimeData($attrs);
+        $authoredClasses = isset($attrs['class']) && is_string($attrs['class']) ? $attrs['class'] : null;
+
         if (isset($attrs['class'])) {
             $classAttrs = TailwindParser::parse($attrs['class']);
             $attrs = array_merge($classAttrs, $attrs);
@@ -210,13 +231,15 @@ class NativeElementCollector
         // Phase 1 — leaves derive an id from `native:key` but don't
         // push onto the path stack (no children to inherit it).
         [$nodeId/* $myKeyPath unused for leaves */] = static::resolveStreamingKey($attrs);
+        $publishedNodeId = static::resolveStreamingPublishedId($nodeId);
 
         $builtinTypes = ['column', 'row', 'stack', 'scroll_view', 'pressable', 'canvas'];
 
         if (in_array($type, $builtinTypes, true)) {
             $layout = static::buildLayoutArray($attrs);
             $style = static::buildStyleArray($attrs);
-            $props = static::buildDarkProps($attrs) + static::buildAnimationProps($attrs);
+            $props = static::buildDarkProps($attrs) + static::buildAnimationProps($attrs)
+                + static::runtimeDataProps($runtimeData) + static::debugHandlerProps($attrs);
             $onPress = static::resolveOnPress($attrs);
             $onLongPress = static::resolveOnLongPress($attrs);
 
@@ -224,6 +247,8 @@ class NativeElementCollector
             if (($doubleTap = static::resolveOnDoubleTap($attrs)) !== 0) {
                 $props['on_double_tap'] = $doubleTap;
             }
+
+            ElementInspector::decorateStreaming($type, $publishedNodeId, $authoredClasses, $attrs, $layout, $style, $props);
 
             nphp_node_leaf(
                 $type,
@@ -254,8 +279,11 @@ class NativeElementCollector
             if (! empty($darkProps)) {
                 $props = array_merge($props ?? [], $darkProps);
             }
+            $props = array_merge($props ?? [], static::runtimeDataProps($runtimeData), static::debugHandlerProps($attrs));
             $onPress = $element->getPressCallbackId(static::$callbacks);
             $onLongPress = $element->getLongPressCallbackId(static::$callbacks);
+
+            ElementInspector::decorateStreaming($type, $publishedNodeId, $authoredClasses, $attrs, $layout, $style, $props);
 
             nphp_node_leaf(
                 $type,
@@ -267,6 +295,53 @@ class NativeElementCollector
                 $nodeId,
             );
         }
+    }
+
+    /**
+     * @param  array<string, string>  $runtimeData
+     * @return array<string, string>
+     */
+    protected static function runtimeDataProps(array $runtimeData): array
+    {
+        if ($runtimeData === [] || ! ElementInspector::enabled()) {
+            return [];
+        }
+
+        $props = [];
+
+        foreach ($runtimeData as $name => $value) {
+            $props['_dbg_rt_'.$name] = $value;
+        }
+
+        return $props;
+    }
+
+    protected static function resolveStreamingPublishedId(int $explicitId): int
+    {
+        $positionalId = static::$streamingNextId++;
+
+        return $explicitId !== 0 ? $explicitId : $positionalId;
+    }
+
+    /**
+     * @param  array<string, mixed>  $attrs
+     * @return array<string, string>
+     */
+    protected static function debugHandlerProps(array $attrs): array
+    {
+        if (! ElementInspector::enabled()) {
+            return [];
+        }
+
+        $props = [];
+
+        foreach (['_press' => '_dbg_press', '_longPress' => '_dbg_long_press', 'ref' => '_dbg_ref'] as $source => $target) {
+            if (isset($attrs[$source]) && is_string($attrs[$source]) && $attrs[$source] !== '') {
+                $props[$target] = $attrs[$source];
+            }
+        }
+
+        return $props;
     }
 
     // ── Layout/style array builders ──────────────────
@@ -799,10 +874,24 @@ class NativeElementCollector
         // (e.g. an error thrown mid-render that skipped the matching
         // closeStreaming pops).
         static::$keyPathStack = [];
+        static::$streamingNextId = 1;
     }
 
     protected static function createElement(string $type, array $attrs): Element
     {
+        $runtimeData = static::extractRuntimeData($attrs);
+
+        $capturedClassString = null;
+        $capturedSourceLocation = null;
+        if (ElementInspector::enabled()) {
+            $capturedClassString = isset($attrs['class']) && is_string($attrs['class'])
+                ? $attrs['class']
+                : null;
+            $capturedSourceLocation = isset($runtimeData['source'])
+                ? null
+                : static::resolveAuthoredSource();
+        }
+
         // Parse Tailwind classes into attribute array
         if (isset($attrs['class'])) {
             $classAttrs = TailwindParser::parse($attrs['class']);
@@ -867,6 +956,17 @@ class NativeElementCollector
             $element->setProp($key, $value);
         }
 
+        if ($capturedClassString !== null) {
+            $element->rememberClassString($capturedClassString);
+        }
+        if ($capturedSourceLocation !== null) {
+            $element->rememberSourceLocation($capturedSourceLocation);
+        }
+
+        foreach ($runtimeData as $name => $value) {
+            $element->runtimeData($name, $value);
+        }
+
         // Accessibility props — same central path, so every element honors
         // `a11y-label` / `a11y-hint` even without per-element wiring (the
         // HasA11y trait covers the fluent API; setProp is idempotent when
@@ -879,6 +979,90 @@ class NativeElementCollector
         }
 
         return $element;
+    }
+
+    /** @return array<string, string> */
+    protected static function extractRuntimeData(array &$attrs): array
+    {
+        $data = [];
+
+        foreach ($attrs as $key => $value) {
+            if (is_string($key) && str_starts_with($key, 'runtime_data:')) {
+                unset($attrs[$key]);
+
+                if (is_string($value) && $value !== '') {
+                    $data[substr($key, 13)] = $value;
+                }
+            }
+        }
+
+        return $data;
+    }
+
+    /** @var array<string, ?string> */
+    protected static array $sourceLocationCache = [];
+
+    protected static function resolveAuthoredSource(): ?string
+    {
+        $frames = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 12);
+
+        foreach ($frames as $frame) {
+            $file = $frame['file'] ?? null;
+
+            if (! is_string($file) || $file === '') {
+                continue;
+            }
+
+            $normalized = str_replace('\\', '/', $file);
+
+            if (str_contains($normalized, '/vendor/')) {
+                continue;
+            }
+
+            if (str_ends_with($normalized, '.blade.php')) {
+                return static::relativeSourcePath($normalized);
+            }
+
+            if (str_contains($normalized, 'framework/views/')) {
+                return static::resolveOriginalViewPath($file);
+            }
+
+            return static::relativeSourcePath($normalized);
+        }
+
+        return null;
+    }
+
+    protected static function resolveOriginalViewPath(string $compiledPath): ?string
+    {
+        if (array_key_exists($compiledPath, static::$sourceLocationCache)) {
+            return static::$sourceLocationCache[$compiledPath];
+        }
+
+        $resolved = null;
+
+        $size = @filesize($compiledPath);
+        if (is_int($size) && $size > 0) {
+            $tail = @file_get_contents($compiledPath, false, null, max(0, $size - 2048));
+            if (is_string($tail) && preg_match('/\/\*\*PATH\s+(.+?)\s+ENDPATH\*\*\//s', $tail, $matches)) {
+                $resolved = static::relativeSourcePath(
+                    str_replace('\\', '/', trim($matches[1]))
+                );
+            }
+        }
+
+        return static::$sourceLocationCache[$compiledPath] = $resolved;
+    }
+
+    protected static function relativeSourcePath(string $path): string
+    {
+        $base = str_replace('\\', '/', base_path());
+
+        if ($base !== '' && str_starts_with($path, $base)) {
+            return ltrim(substr($path, strlen($base)), '/');
+        }
+
+        return $path;
     }
 
     public static function applyLayout(Element $element, array $attrs): void

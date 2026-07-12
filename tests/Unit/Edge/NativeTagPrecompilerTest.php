@@ -173,3 +173,24 @@ it('interpolates array access inside {{ }} in attribute values', function () {
 
     expect($result)->toContain("'src' => (\$listing['imageUrl'])");
 });
+
+it('compiles runtime_data attributes to literal string entries', function () use ($collector, $marker) {
+    $result = ($this->precompiler)('<native:spacer runtime_data:map="Zm9vYmFy" />');
+
+    expect($result)->toBe($marker."<?php {$collector}::leaf('spacer', ['runtime_data:map' => 'Zm9vYmFy']); ?>");
+});
+
+it('compiles single-quoted runtime_data attributes', function () {
+    $result = ($this->precompiler)("<native:spacer runtime_data:src='views/home' />");
+
+    expect($result)->toContain("'runtime_data:src' => 'views/home'");
+});
+
+it('keeps runtime_data attributes alongside normal and dynamic attributes', function () {
+    $result = ($this->precompiler)('<native:text class="text-lg" runtime_data:map="abc123" :fontSize="$size">Hi</native:text>');
+
+    expect($result)->toContain("'class' => 'text-lg'");
+    expect($result)->toContain("'runtime_data:map' => 'abc123'");
+    expect($result)->toContain("'fontSize' => (\$size)");
+    expect($result)->not->toContain("'runtime_data:map' => (");
+});
