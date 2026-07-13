@@ -34,7 +34,7 @@
         </provider>
         <activity
         android:name=".ui.MainActivity"
-            android:configChanges="uiMode|colorMode|orientation|screenSize"
+            android:configChanges="uiMode|colorMode|orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">

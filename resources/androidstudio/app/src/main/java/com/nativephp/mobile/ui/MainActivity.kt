@@ -383,6 +383,20 @@ class MainActivity : FragmentActivity(), WebViewProvider {
             }
 
             Handler(Looper.getMainLooper()).post {
+                // The PHP boot pipeline runs on a background thread, so this
+                // callback can land AFTER a configuration change destroyed the
+                // activity (e.g. a rotation while boot was in flight). Touching
+                // the destroyed instance's FragmentManager is a fatal
+                // IllegalStateException; the recreated activity runs its own
+                // onCreate -> initializeEnvironmentAsync, so the stale callback
+                // just stands down.
+                if (isDestroyed || isFinishing) {
+                    Log.w(
+                        "LaravelInit",
+                        "Activity destroyed before environment-ready callback — skipping stale initialization",
+                    )
+                    return@post
+                }
                 onReady()
             }
         }.start()
