@@ -113,20 +113,25 @@ fun NodeView(node: NativeUINode, overrideModifier: Modifier? = null) {
         // SharedValue bindings (companion `_sv` props) take precedence
         // over literals. The `evaluate` call is @Composable — its
         // mutableState read subscribes the caller to recomposition.
+        // The literal (PHP's snapshot of the SharedValue at publish
+        // time) doubles as evaluate's `initial`, so an id the store
+        // hasn't seen yet — fresh from a re-render that minted a new
+        // SharedValue — renders at its initial value instead of 0.
         val txRef = node.props.getString("translate-x_sv", "")
         val tyRef = node.props.getString("translate-y_sv", "")
         val scRef = node.props.getString("scale_sv", "")
         val rtRef = node.props.getString("rotate_sv", "")
         val opRef = node.props.getString("opacity_sv", "")
 
-        val translateX = if (txRef.isNotEmpty()) SharedValueStore.evaluate(txRef) ?: 0f
-                         else node.props.getFloat("translate-x", 0f)
-        val translateY = if (tyRef.isNotEmpty()) SharedValueStore.evaluate(tyRef) ?: 0f
-                         else node.props.getFloat("translate-y", 0f)
-        val scaleVal   = if (scRef.isNotEmpty()) SharedValueStore.evaluate(scRef) ?: 1f
-                         else node.props.getFloat("scale", 1f)
-        val rotateVal  = if (rtRef.isNotEmpty()) SharedValueStore.evaluate(rtRef) ?: 0f
-                         else node.props.getFloat("rotate", 0f)
+        val txLit = node.props.getFloat("translate-x", 0f)
+        val tyLit = node.props.getFloat("translate-y", 0f)
+        val scLit = node.props.getFloat("scale", 1f)
+        val rtLit = node.props.getFloat("rotate", 0f)
+
+        val translateX = if (txRef.isNotEmpty()) SharedValueStore.evaluate(txRef, txLit) ?: 0f else txLit
+        val translateY = if (tyRef.isNotEmpty()) SharedValueStore.evaluate(tyRef, tyLit) ?: 0f else tyLit
+        val scaleVal   = if (scRef.isNotEmpty()) SharedValueStore.evaluate(scRef, scLit) ?: 1f else scLit
+        val rotateVal  = if (rtRef.isNotEmpty()) SharedValueStore.evaluate(rtRef, rtLit) ?: 0f else rtLit
 
         val hasTransforms = translateX != 0f || translateY != 0f
             || scaleVal != 1f || rotateVal != 0f
@@ -154,7 +159,7 @@ fun NodeView(node: NativeUINode, overrideModifier: Modifier? = null) {
                 style != null -> style.opacity
                 else -> 1f
             }
-            val targetOpacity = if (opRef.isNotEmpty()) SharedValueStore.evaluate(opRef) ?: literalOpacity
+            val targetOpacity = if (opRef.isNotEmpty()) SharedValueStore.evaluate(opRef, literalOpacity) ?: literalOpacity
                                 else literalOpacity
             val easingName = node.props.getString("animate-easing", "ease-in-out")
             val isSpring = easingName == "spring"
@@ -171,9 +176,11 @@ fun NodeView(node: NativeUINode, overrideModifier: Modifier? = null) {
             // instead of a tween, to match SwiftUI's `.spring(...)`.
             // Duration on spring is approximate — the dampingRatio /
             // stiffness drive the actual feel.
+            val delayMs = node.props.getFloat("animate-delay", 0f).toInt().coerceAtLeast(0)
+
             fun <T> oneShotSpec(): androidx.compose.animation.core.AnimationSpec<T> =
                 if (isSpring) spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium)
-                else tween(durationMillis = animateDuration.toInt().coerceAtLeast(1), easing = easing)
+                else tween(durationMillis = animateDuration.toInt().coerceAtLeast(1), delayMillis = delayMs, easing = easing)
 
             if (animateLoop) {
                 val infinite = rememberInfiniteTransition(label = "node_loop")
@@ -181,9 +188,14 @@ fun NodeView(node: NativeUINode, overrideModifier: Modifier? = null) {
                 // so `spring` falls back to a tween for loop mode —
                 // springs have natural completion, the "yoyo" repeat
                 // wouldn't have a meaningful spring shape anyway.
+                // `animate-delay` staggers loop phases across siblings via
+                // a start offset rather than a per-cycle delay.
                 val loopSpec = infiniteRepeatable<Float>(
                     animation = tween(durationMillis = effectiveMs, easing = easing),
                     repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = androidx.compose.animation.core.StartOffset(
+                        delayMs, androidx.compose.animation.core.StartOffsetType.Delay
+                    ),
                 )
                 animAlpha   = infinite.animateFloat(initialValue = 1f, targetValue = targetOpacity, animationSpec = loopSpec, label = "loop_alpha").value
                 animTx      = infinite.animateFloat(initialValue = 0f, targetValue = translateX,    animationSpec = loopSpec, label = "loop_tx").value

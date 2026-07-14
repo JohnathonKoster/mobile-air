@@ -506,6 +506,7 @@ class NativeElementCollector
      *
      * Supported props:
      *   - `animate-duration` (ms float, > 0 enables animation)
+     *   - `animate-delay`    (ms float, start offset; loop mode staggers the cycle)
      *   - `animate-easing`   (string: linear / ease-in / ease-out / ease-in-out)
      *   - `translate-x` / `translate-y` (points, offset from layout position)
      *   - `scale`            (uniform scale factor, 1.0 = identity)
@@ -517,6 +518,9 @@ class NativeElementCollector
 
         if (isset($attrs['animate-duration'])) {
             $props['animate-duration'] = (float) $attrs['animate-duration'];
+        }
+        if (isset($attrs['animate-delay'])) {
+            $props['animate-delay'] = (float) $attrs['animate-delay'];
         }
         if (isset($attrs['animate-easing'])) {
             $props['animate-easing'] = (string) $attrs['animate-easing'];
@@ -1252,6 +1256,12 @@ class NativeElementCollector
         }
         if (isset($attrs['_swipeDelete']) && method_exists($element, 'onSwipeDelete')) {
             $element->onSwipeDelete($attrs['_swipeDelete']);
+        }
+        if (isset($attrs['_swipe']) && method_exists($element, 'onSwipe')) {
+            $element->onSwipe($attrs['_swipe']);
+        }
+        if (isset($attrs['_pinchEnd']) && method_exists($element, 'onPinchEnd')) {
+            $element->onPinchEnd($attrs['_pinchEnd']);
         }
         if (isset($attrs['_navigate'])) {
             $element->setNavigateConfig($attrs['_navigate']);

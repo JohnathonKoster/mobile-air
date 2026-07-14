@@ -485,6 +485,15 @@ abstract class NativeComponent
             $navBar = null;
             if (! $hasInlineNavBar) {
                 $navBar = $layout->navBar($this);
+                // Per-screen opt-out ($hidesNavBar shortcut + navigationOptions()
+                // builder). On this custom-Column path hiding is identical to
+                // the layout returning null. The native-chrome path instead
+                // keeps the bar config and folds a `hide_nav_bar` prop onto
+                // the sentinel — the NavigationStack must survive for push /
+                // pop to keep working.
+                if ($navBar !== null && ! $layout->usesNativeChrome() && $this->shouldHideNavBar()) {
+                    $navBar = null;
+                }
                 if ($navBar !== null) {
                     $navBar->mergeOptions($this->navigationOptions());
                     if (! empty($this->nativePendingNavBarState)) {
@@ -654,6 +663,11 @@ abstract class NativeComponent
             if ($this->shouldHideTabBar()) {
                 $attrs['hideTabBar'] = true;
             }
+            // Per-screen nav-bar opt-out, same shape as `hideTabBar` — the
+            // renderers hide the toolbar for this destination only.
+            if ($navBar !== null && $this->shouldHideNavBar()) {
+                $attrs['hideNavBar'] = true;
+            }
             $tabOptions = $this->tabBarOptions();
             if ($tabOptions !== null) {
                 if ($tabOptions->highlight !== null) {
@@ -769,6 +783,11 @@ abstract class NativeComponent
             // NavigationCoordinator can route push / pop / no-op
             // correctly across publishes.
             $attrs['currentUri'] = $this->nativeRouter?->currentUri() ?? '';
+            // Per-screen nav-bar opt-out — the sentinel (and its
+            // NavigationStack) survives; only the toolbar hides.
+            if ($this->shouldHideNavBar()) {
+                $attrs['hideNavBar'] = true;
+            }
             $root->applyAttributes($attrs);
             foreach ($navBar->getActions() as $action) {
                 $root->addChild($action->toElement());
@@ -988,6 +1007,33 @@ abstract class NativeComponent
     }
 
     /**
+     * Hide the nav bar on this screen — shorthand for the full-bleed /
+     * immersive case (photo viewer, onboarding, video). Equivalent to
+     * `navigationOptions()->hidden()`. When both are set the explicit
+     * builder wins. Default `false` → the layout's nav bar shows.
+     */
+    protected bool $hidesNavBar = false;
+
+    /**
+     * Resolved "should the nav bar be hidden on this screen?" — combines
+     * the boolean shortcut and the builder. The builder wins on conflict
+     * (more explicit). On the custom-Column chrome path [wrapWithChrome]
+     * simply skips the bar; on the native-chrome path
+     * [wrapWithNativeChrome] folds a `hide_nav_bar` prop onto the chrome
+     * sentinel (the sentinel itself must survive — iOS keys push / pop
+     * off it).
+     */
+    public function shouldHideNavBar(): bool
+    {
+        $options = $this->navigationOptions();
+        if ($options !== null && $options->hidden !== null) {
+            return $options->isHidden();
+        }
+
+        return $this->hidesNavBar;
+    }
+
+    /**
      * Hide the tab bar on this screen — Filament-style shorthand for the
      * common "pushed detail screen" case. Equivalent to
      * `tabBarOptions()->hidden()`. When both are set the explicit builder
@@ -1113,6 +1159,19 @@ abstract class NativeComponent
             // instance and grants access to protected/private members via the
             // class-scope second argument.
             //
+            // Participate in the Factory's render counting, mirroring
+            // View::render()/renderContents(). The direct include below runs
+            // outside Factory::render(), so without our increment the first
+            // nested @include drops the count 0→1→0 and its
+            // flushStateIfDoneRendering() wipes sections and component slot
+            // storage mid-render — crashing any open <x-*> component in the
+            // template. On success, flush only once the outermost render
+            // finishes; on throw, flushState() (which resets the count
+            // itself — a `finally` decrement after a nested flush would
+            // drive it negative, which is why Laravel uses catch-flush too).
+            $factory = view();
+            $factory->incrementRender();
+
             // Buffer and discard the include's textual output: a native view
             // builds its element tree via collector side effects, so anything
             // echoed is just the literal whitespace between <native:*> tags in
@@ -1125,9 +1184,15 @@ abstract class NativeComponent
                     extract($viewData, EXTR_SKIP);
                     include $compiledPath;
                 }, $this, static::class)();
+            } catch (\Throwable $e) {
+                $factory->flushState();
+                throw $e;
             } finally {
                 ob_end_clean();
             }
+
+            $factory->decrementRender();
+            $factory->flushStateIfDoneRendering();
         } finally {
             NativeTagPrecompiler::setActive($wasActive);
         }
