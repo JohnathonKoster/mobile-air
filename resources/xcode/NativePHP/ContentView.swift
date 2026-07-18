@@ -63,6 +63,10 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.25), value: nativeUIBridge.screenKey)
         .animation(.easeInOut(duration: 0.2), value: nativeUIBridge.isActive)
         .animation(.easeInOut(duration: 0.2), value: nativeUIBridge.isReloading)
+        // Global 3-finger swipe-right escape hatch (attaches a recognizer to the
+        // key window). Fires `JumpEscapeHatch`; the Jump client exits any
+        // connected demo app back to the Jump home.
+        .background(EscapeHatchGesture())
         // Push a native AppearanceChanged event to PHP when the system theme
         // flips (Control Center toggle, sunset auto-switch). Drives the
         // reactive `System::appearance()` / `#[On(AppearanceChanged)]` path.
@@ -76,6 +80,21 @@ struct ContentView: View {
     /// Handle navigation from any UI component
     /// Uses Inertia router if available for SPA-like navigation, falls back to full page load
     private func handleNavigation(_ url: String) {
+        // In a Jump WebView session, native-chrome / side-nav / tab links point at
+        // the dev-server host (absolute URLs). Route them through the WebView
+        // forward (php://127.0.0.1) exactly like anchor taps — otherwise
+        // isExternalUrl() sees a non-localhost host and opens them in the system
+        // browser, and the Inertia path below doesn't exist for a plain WebView app.
+        if JumpWebViewSession.shared.isActive {
+            let path = extractPath(url)
+            NotificationCenter.default.post(
+                name: .redirectToURLNotification,
+                object: nil,
+                userInfo: ["url": "php://127.0.0.1\(path)"]
+            )
+            return
+        }
+
         // Check if this is an external HTTP/HTTPS URL
         if isExternalUrl(url) {
             // Open external URLs in the default browser

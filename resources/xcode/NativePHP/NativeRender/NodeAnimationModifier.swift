@@ -4,6 +4,7 @@ import SwiftUI
 ///
 /// Driven by props on the node:
 ///   - `animate-duration` (ms float, > 0 enables animations on state change).
+///   - `animate-delay`    (ms float, start offset; staggers loop phase).
 ///   - `animate-easing`   (string).
 ///   - `animate-loop`     (bool — yoyo forever between identity and configured).
 ///   - `translate-x` / `translate-y` (points, or `__sv:` wire ref).
@@ -34,10 +35,14 @@ struct NodeAnimationModifier: ViewModifier {
         let rotate     = Double(resolveTransform("rotate", literal: CGFloat(props.getFloat("rotate", default: 0))))
         let opacity: Double = {
             let ref = props.getString("opacity_sv", default: "")
-            if !ref.isEmpty, let v = store.evaluate(ref) {
+            // Style opacity stays 1.0 when SV-bound (the collector routes
+            // the binding through the prop bag), so it doubles as the
+            // pre-seed base for a wire-fresh id.
+            let literal = CGFloat(style?.opacity ?? 1)
+            if !ref.isEmpty, let v = store.evaluate(ref, initial: literal) {
                 return Double(v)
             }
-            return Double(style?.opacity ?? 1)
+            return Double(literal)
         }()
 
         let animate = durationMs > 0 || loop
@@ -73,7 +78,11 @@ struct NodeAnimationModifier: ViewModifier {
             easing: props.getString("animate-easing", default: "ease-in-out"),
             durationMs: effectiveMs
         )
-        let anim = loop ? baseAnim.repeatForever(autoreverses: true) : baseAnim
+        // `animate-delay` offsets the start of the whole animation (the
+        // delay is outside `repeatForever`, so loops stagger their phase
+        // rather than pausing every cycle).
+        let delaySec = Double(props.getFloat("animate-delay", default: 0)) / 1000.0
+        let anim = (loop ? baseAnim.repeatForever(autoreverses: true) : baseAnim).delay(delaySec)
 
         // Opacity applies when:
         //   - this modifier is in animate mode (durationMs > 0 or loop), OR
@@ -93,10 +102,14 @@ struct NodeAnimationModifier: ViewModifier {
     }
 
     /// If a SharedValue binding is present for `prop`, evaluate it
-    /// against the store. Otherwise return the literal.
+    /// against the store. Otherwise return the literal. The literal is
+    /// also the pre-seed base: PHP writes the SharedValue's current
+    /// snapshot alongside every `{prop}_sv` binding, so an id the store
+    /// hasn't seen yet (fresh from a re-render) evaluates its formula
+    /// against that snapshot instead of 0.
     private func resolveTransform(_ prop: String, literal: CGFloat) -> CGFloat {
         let ref = props.getString("\(prop)_sv", default: "")
-        if !ref.isEmpty, let v = store.evaluate(ref) {
+        if !ref.isEmpty, let v = store.evaluate(ref, initial: literal) {
             return v
         }
         return literal

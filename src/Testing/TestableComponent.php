@@ -72,10 +72,10 @@ class TestableComponent
     protected const EVENT_CALLBACK_KEYS = [
         self::EVENT_PRESS => ['on_press'],
         self::EVENT_LONG_PRESS => ['on_long_press'],
-        self::EVENT_TEXT_CHANGE => ['on_change'],
+        self::EVENT_TEXT_CHANGE => ['on_change', 'on_swipe'],
         self::EVENT_TOGGLE_CHANGE => ['on_change'],
         self::EVENT_SUBMIT => ['on_submit'],
-        self::EVENT_SLIDER_CHANGE => ['on_change'],
+        self::EVENT_SLIDER_CHANGE => ['on_change', 'on_pinch_end'],
         self::EVENT_CHECKBOX_CHANGE => ['on_change'],
         self::EVENT_RADIO_CHANGE => ['on_change'],
         self::EVENT_SELECT_CHANGE => ['on_change'],
@@ -321,6 +321,25 @@ class TestableComponent
     public function slide(string $target, float $value): static
     {
         return $this->fireEvent($target, self::EVENT_SLIDER_CHANGE, ['value' => $value]);
+    }
+
+    /**
+     * Fire a gesture-area swipe bound to `@swipe`. Direction is one of
+     * "left", "right", "up", "down" — delivered to the handler as a
+     * string, exactly as the device sends it.
+     */
+    public function swipe(string $target, string $direction = 'left'): static
+    {
+        return $this->fireEvent($target, self::EVENT_TEXT_CHANGE, ['text' => $direction]);
+    }
+
+    /**
+     * Fire a gesture-area pinch-end bound to `@pinchEnd`, delivering the
+     * final scale factor (1.0 = identity) as a float.
+     */
+    public function pinch(string $target, float $scale): static
+    {
+        return $this->fireEvent($target, self::EVENT_SLIDER_CHANGE, ['value' => $scale]);
     }
 
     public function selectRadio(string $target, string $value): static
@@ -865,6 +884,56 @@ class TestableComponent
         Assert::assertFalse(
             (bool) ($tabs['props']['hide_tab_bar'] ?? false),
             'Expected the tab bar to be visible, but hide_tab_bar is set.'
+        );
+
+        return $this;
+    }
+
+    /**
+     * Assert the nav bar is hidden on this screen (`$hidesNavBar` /
+     * `navigationOptions()->hidden()`), across both chrome paths: on the
+     * native-chrome path the sentinel carries `hide_nav_bar`; on the
+     * custom-Column path the bar is simply not rendered.
+     */
+    public function assertNavBarHidden(): static
+    {
+        $root = $this->findElement($this->tree(), 'native_root_tabs')
+            ?? $this->findElement($this->tree(), 'native_root_stack');
+
+        if ($root !== null) {
+            Assert::assertTrue(
+                (bool) ($root['props']['hide_nav_bar'] ?? false),
+                'Expected the nav bar to be hidden on this screen, but hide_nav_bar is not set.'
+            );
+
+            return $this;
+        }
+
+        Assert::assertNull(
+            $this->findElement($this->tree(), 'top_bar'),
+            'Expected the nav bar to be hidden on this screen, but a top_bar element was rendered.'
+        );
+
+        return $this;
+    }
+
+    public function assertNavBarVisible(): static
+    {
+        $root = $this->findElement($this->tree(), 'native_root_tabs')
+            ?? $this->findElement($this->tree(), 'native_root_stack');
+
+        if ($root !== null) {
+            Assert::assertFalse(
+                (bool) ($root['props']['hide_nav_bar'] ?? false),
+                'Expected the nav bar to be visible, but hide_nav_bar is set.'
+            );
+
+            return $this;
+        }
+
+        Assert::assertNotNull(
+            $this->findElement($this->tree(), 'top_bar'),
+            'Expected a visible nav bar, but no chrome rendered one — does the screen have a layout with a NavBar?'
         );
 
         return $this;
