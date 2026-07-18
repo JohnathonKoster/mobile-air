@@ -25,6 +25,7 @@ use Native\Mobile\Edge\Layouts\Builders\NavBarOptions;
 use Native\Mobile\Edge\Layouts\Builders\TabBar;
 use Native\Mobile\Edge\Layouts\Builders\TabBarOptions;
 use Native\Mobile\Edge\Layouts\NativeLayout;
+use Native\Mobile\Events\Concerns\BroadcastsGlobally;
 use Native\Mobile\JumpBridge;
 use Native\Mobile\Support\NativeCallbacks;
 use Symfony\Component\VarDumper\Cloner\VarCloner;
@@ -60,6 +61,19 @@ abstract class NativeComponent
     private static array $interactionWillDispatchObservers = [];
 
     private static int $interactionWillDispatchObserverSeq = 0;
+
+    /** @var array<int, callable(array<string, mixed>): void> */
+    private static array $nativeEventDispatchedObservers = [];
+
+    private static int $nativeEventDispatchedObserverSeq = 0;
+
+    /** @var array<int, callable(array<string, mixed>): void> */
+    private static array $nativeEventWillDispatchObservers = [];
+
+    private static int $nativeEventWillDispatchObserverSeq = 0;
+
+    /** @var array<class-string, array<int, \ReflectionProperty>> */
+    private static array $publicPropertyCache = [];
 
     /** @var array<int, callable(\Throwable, string): void> */
     private static array $renderErrorObservers = [];
@@ -1349,11 +1363,13 @@ abstract class NativeComponent
 
     private function getPublicProperties(): array
     {
-        $reflect = new \ReflectionClass($this);
+        $class = static::class;
+        $properties = self::$publicPropertyCache[$class]
+            ??= (new \ReflectionClass($this))->getProperties(\ReflectionProperty::IS_PUBLIC);
         $props = [];
 
-        foreach ($reflect->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
-            if (! $prop->isStatic()) {
+        foreach ($properties as $prop) {
+            if (! $prop->isStatic() && $prop->isInitialized($this)) {
                 $props[$prop->getName()] = $prop->getValue($this);
             }
         }
@@ -1673,6 +1689,68 @@ abstract class NativeComponent
         $eventName = $event['event'] ?? '';
         $payload = $event['payload'] ?? [];
 
+        if (! is_string($eventName) || $eventName === '') {
+            return;
+        }
+
+        $observingWill = self::$nativeEventWillDispatchObservers !== [];
+        $observingDid = self::$nativeEventDispatchedObservers !== [];
+
+        if (! $observingWill && ! $observingDid) {
+            $this->dispatchNativeEventHandlers($eventName, $payload);
+
+            return;
+        }
+
+        $method = $eventName === '__deeplink'
+            ? '__navigate'
+            : ($this->nativeEventListeners[$eventName]
+                ?? $this->nativeEventListeners['native:'.$eventName]
+                ?? null);
+        $before = $observingDid ? $this->getPublicProperties() : [];
+        $startedAt = $observingDid ? hrtime(true) : 0;
+        $error = null;
+
+        if ($observingWill) {
+            $willSnapshot = [
+                'id' => spl_object_hash($this),
+                'class' => static::class,
+                'uri' => $this->nativeRouter?->currentUri() ?? '',
+                'event' => $eventName,
+                'method' => $method,
+                'payload' => is_array($payload) ? $payload : ['value' => $payload],
+            ];
+
+            foreach (self::$nativeEventWillDispatchObservers as $willObserver) {
+                try {
+                    $willObserver($willSnapshot);
+                } catch (\Throwable) {
+                }
+            }
+        }
+
+        try {
+            $this->dispatchNativeEventHandlers($eventName, $payload);
+        } catch (\Throwable $exception) {
+            $error = $exception;
+
+            throw $exception;
+        } finally {
+            if ($observingDid) {
+                $this->notifyNativeEventDispatched(
+                    $eventName,
+                    $payload,
+                    $method,
+                    $before,
+                    $startedAt,
+                    $error,
+                );
+            }
+        }
+    }
+
+    private function dispatchNativeEventHandlers(string $eventName, mixed $payload): void
+    {
         // Deep link / universal link arriving while the app is already running.
         // The native shell (DeepLinkRouter) posts this to wake the blocked event
         // loop — a warm php:// load can't route because this loop owns the PHP
@@ -1769,7 +1847,7 @@ abstract class NativeComponent
         $class = str_starts_with($eventName, 'native:') ? substr($eventName, 7) : $eventName;
 
         if (! class_exists($class)
-            || ! is_subclass_of($class, \Native\Mobile\Events\Concerns\BroadcastsGlobally::class)) {
+            || ! is_subclass_of($class, BroadcastsGlobally::class)) {
             return;
         }
 
@@ -3054,6 +3132,77 @@ abstract class NativeComponent
     public static function stopObservingInteractionWillDispatch(int $id): void
     {
         unset(self::$interactionWillDispatchObservers[$id]);
+    }
+
+    /** @param callable(array<string, mixed>): void $observer */
+    public static function observeNativeEventDispatched(callable $observer): int
+    {
+        $id = ++self::$nativeEventDispatchedObserverSeq;
+        self::$nativeEventDispatchedObservers[$id] = $observer;
+
+        return $id;
+    }
+
+    public static function stopObservingNativeEventDispatched(int $id): void
+    {
+        unset(self::$nativeEventDispatchedObservers[$id]);
+    }
+
+    /** @param callable(array<string, mixed>): void $observer */
+    public static function observeNativeEventWillDispatch(callable $observer): int
+    {
+        $id = ++self::$nativeEventWillDispatchObserverSeq;
+        self::$nativeEventWillDispatchObservers[$id] = $observer;
+
+        return $id;
+    }
+
+    public static function stopObservingNativeEventWillDispatch(int $id): void
+    {
+        unset(self::$nativeEventWillDispatchObservers[$id]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $before
+     */
+    private function notifyNativeEventDispatched(
+        string $eventName,
+        mixed $payload,
+        ?string $method,
+        array $before,
+        int $startedAt,
+        ?\Throwable $error = null,
+    ): void {
+        if (self::$nativeEventDispatchedObservers === []) {
+            return;
+        }
+
+        $snapshot = [
+            'id' => spl_object_hash($this),
+            'name' => class_basename(static::class),
+            'class' => static::class,
+            'uri' => $this->nativeRouter?->currentUri() ?? '',
+            'event' => $eventName,
+            'method' => $method,
+            'payload' => is_array($payload) ? $payload : ['value' => $payload],
+            'stateBefore' => $before,
+            'stateAfter' => $this->getPublicProperties(),
+            'renderCount' => $this->publishCount,
+            'durationMs' => (hrtime(true) - $startedAt) / 1_000_000,
+            'error' => $error === null ? null : [
+                'class' => $error::class,
+                'message' => $error->getMessage(),
+                'file' => $error->getFile(),
+                'line' => $error->getLine(),
+            ],
+        ];
+
+        foreach (self::$nativeEventDispatchedObservers as $observer) {
+            try {
+                $observer($snapshot);
+            } catch (\Throwable) {
+            }
+        }
     }
 
     /**

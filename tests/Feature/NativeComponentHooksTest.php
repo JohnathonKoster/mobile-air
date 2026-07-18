@@ -1,11 +1,13 @@
 <?php
 
+use Native\Mobile\Attributes\On;
 use Native\Mobile\Edge\Inspector\ElementInspector;
 use Native\Mobile\Edge\NativeComponent;
 use Native\Mobile\Edge\NativeRouter;
 use Native\Mobile\Testing\Native;
 use Native\Mobile\Testing\TestableComponent;
 use Tests\Fixtures\Edge\CounterScreen;
+use Tests\Fixtures\Edge\PingReceived;
 
 afterEach(function () {
     ElementInspector::enable(false);
@@ -141,6 +143,110 @@ it('announces an interaction before its handler runs', function () {
     expect($order)->toBe(['will:increment', 'did:increment']);
 });
 
+it('observes native events around their component handler', function () {
+    $order = [];
+    $snapshots = [];
+
+    $willId = NativeComponent::observeNativeEventWillDispatch(function (array $snapshot) use (&$order) {
+        $order[] = 'will:'.$snapshot['event'];
+    });
+    $didId = NativeComponent::observeNativeEventDispatched(function (array $snapshot) use (&$order, &$snapshots) {
+        $order[] = 'did:'.$snapshot['event'];
+        $snapshots[] = $snapshot;
+    });
+
+    try {
+        Native::test(CounterScreen::class)
+            ->emitNative(PingReceived::class, ['message' => 'hello']);
+    } finally {
+        NativeComponent::stopObservingNativeEventWillDispatch($willId);
+        NativeComponent::stopObservingNativeEventDispatched($didId);
+    }
+
+    expect($order)->toBe([
+        'will:'.PingReceived::class,
+        'did:'.PingReceived::class,
+    ]);
+    expect($snapshots)->toHaveCount(1)
+        ->and($snapshots[0]['class'])->toBe(CounterScreen::class)
+        ->and($snapshots[0]['method'])->toBe('onPing')
+        ->and($snapshots[0]['payload'])->toBe(['message' => 'hello'])
+        ->and($snapshots[0]['stateBefore']['pings'])->toBe([])
+        ->and($snapshots[0]['stateAfter']['pings'])->toBe(['hello'])
+        ->and($snapshots[0]['error'])->toBeNull()
+        ->and($snapshots[0]['durationMs'])->toBeGreaterThanOrEqual(0);
+});
+
+it('isolates throwing native event observers from the component handler', function () {
+    $willId = NativeComponent::observeNativeEventWillDispatch(function (): void {
+        throw new RuntimeException('broken will observer');
+    });
+    $didId = NativeComponent::observeNativeEventDispatched(function (): void {
+        throw new RuntimeException('broken did observer');
+    });
+
+    try {
+        $screen = Native::test(CounterScreen::class)
+            ->emitNative(PingReceived::class, ['message' => 'hello']);
+    } finally {
+        NativeComponent::stopObservingNativeEventWillDispatch($willId);
+        NativeComponent::stopObservingNativeEventDispatched($didId);
+    }
+
+    $screen->assertSet('pings', ['hello']);
+});
+
+it('reports handler failures without replacing the original exception', function () {
+    $snapshots = [];
+    $observerId = NativeComponent::observeNativeEventDispatched(function (array $snapshot) use (&$snapshots): void {
+        $snapshots[] = $snapshot;
+    });
+    $exception = null;
+
+    try {
+        Native::test(ThrowingNativeEventScreen::class)
+            ->emitNative(PingReceived::class, ['message' => 'hello']);
+    } catch (RuntimeException $caught) {
+        $exception = $caught;
+    } finally {
+        NativeComponent::stopObservingNativeEventDispatched($observerId);
+    }
+
+    expect($exception)->not->toBeNull()
+        ->and($exception->getMessage())->toBe('native handler failed')
+        ->and($snapshots)->toHaveCount(1)
+        ->and($snapshots[0]['error']['class'])->toBe(RuntimeException::class)
+        ->and($snapshots[0]['error']['message'])->toBe('native handler failed')
+        ->and($snapshots[0]['stateBefore'])->not->toHaveKey('notInitialized')
+        ->and($snapshots[0]['stateAfter'])->not->toHaveKey('notInitialized');
+});
+
+it('keeps native dispatch independent of subclass helper name collisions', function () {
+    Native::test(NativeEventHelperCollisionScreen::class)
+        ->emitNative(PingReceived::class, ['message' => 'hello'])
+        ->assertSet('pings', ['hello'])
+        ->assertSet('dispatchHelperCalled', false);
+});
+
+it('stops notifying native event observers after they unregister', function () {
+    $notifications = 0;
+    $willId = NativeComponent::observeNativeEventWillDispatch(function () use (&$notifications): void {
+        $notifications++;
+    });
+    $didId = NativeComponent::observeNativeEventDispatched(function () use (&$notifications): void {
+        $notifications++;
+    });
+
+    NativeComponent::stopObservingNativeEventWillDispatch($willId);
+    NativeComponent::stopObservingNativeEventDispatched($didId);
+
+    Native::test(CounterScreen::class)
+        ->emitNative(PingReceived::class, ['message' => 'hello'])
+        ->assertSet('pings', ['hello']);
+
+    expect($notifications)->toBe(0);
+});
+
 it('normalizes signed native node ids to their uint32 inspector identity', function () {
     $normalize = new ReflectionMethod(NativeComponent::class, 'unsignedNodeId');
 
@@ -217,3 +323,24 @@ it('ignores a registered harness that is not a TestableComponent subclass', func
 });
 
 class ObservingHarness extends TestableComponent {}
+
+class ThrowingNativeEventScreen extends CounterScreen
+{
+    public int $notInitialized;
+
+    #[On(PingReceived::class)]
+    public function onPing(string $message): void
+    {
+        throw new RuntimeException('native handler failed');
+    }
+}
+
+class NativeEventHelperCollisionScreen extends CounterScreen
+{
+    public bool $dispatchHelperCalled = false;
+
+    protected function dispatchNativeEventHandlers(string $eventName, mixed $payload): void
+    {
+        $this->dispatchHelperCalled = true;
+    }
+}
