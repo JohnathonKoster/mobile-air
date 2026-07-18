@@ -27,6 +27,7 @@ use Native\Mobile\Edge\Layouts\Builders\TabBarOptions;
 use Native\Mobile\Edge\Layouts\NativeLayout;
 use Native\Mobile\Events\Concerns\BroadcastsGlobally;
 use Native\Mobile\JumpBridge;
+use Native\Mobile\Platform;
 use Native\Mobile\Support\NativeCallbacks;
 use Symfony\Component\VarDumper\Cloner\VarCloner;
 use Symfony\Component\VarDumper\Dumper\CliDumper;
@@ -2490,6 +2491,22 @@ abstract class NativeComponent
 
     public function back(): static
     {
+        // At the root of the native stack there is nothing to pop — letting
+        // the intent through would empty the router's stack, exit the
+        // runloop, and strand the user on the blank WebView underneath.
+        // Follow platform convention instead: on Android the system back
+        // button backgrounds the app; on iOS the press is ignored. The
+        // Platform probe is null under Native::test() (no bridge), so the
+        // harness keeps its BACK-intent assertions.
+        if ($this->nativeRouter?->isRootScreen()
+            && ($platform = Platform::current()) !== null) {
+            if ($platform === Platform::ANDROID && function_exists('nativephp_call')) {
+                nativephp_call('System.MinimizeApp', '{}');
+            }
+
+            return $this;
+        }
+
         $this->nativeNavigationIntent = new NavigationIntent(NavigationIntent::BACK);
         $this->publishFinalState();
         $this->stop();
